@@ -6,10 +6,10 @@ Oracle Cloud Infrastructure Always Free.
 
 ## Current status
 
-The project is in its initial foundation phase. The FastAPI application,
-development container, environment template, package structure, and health tests
-are available. WhatsApp, OCI, database, queue, and Google Drive integrations are
-planned for the next tasks.
+The FastAPI application now exposes the health check and the WhatsApp webhook.
+Webhook verification, X-Hub-Signature-256 validation, JSON validation, and
+document message normalization are implemented. Database, queue, OCI, and
+Google Drive integrations are planned for the next tasks.
 
 ## Target architecture
 
@@ -77,6 +77,18 @@ Open:
 - Health check: http://localhost:8000/health
 - OpenAPI documentation: http://localhost:8000/docs
 
+## API endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/health` | Application health check |
+| GET | `/webhook` | Meta webhook verification |
+| POST | `/webhook` | Receive signed WhatsApp events |
+
+The POST endpoint currently validates and normalizes document events, then
+returns immediately. Persisting and queueing these events will be implemented in
+the next tasks.
+
 ## Docker
 
 ```bash
@@ -104,14 +116,22 @@ keys, or service account files.
 
 Production secrets will be stored in OCI Vault.
 
+The WhatsApp webhook requires these values during local integration testing:
+
+```env
+WHATSAPP_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+```
+
 ## Roadmap
 
 - [x] Create the initial repository foundation
 - [x] Add FastAPI health endpoints
 - [x] Add local Docker support
 - [x] Add initial automated tests
-- [ ] Implement WhatsApp webhook verification
-- [ ] Validate webhook signatures
+- [x] Implement WhatsApp webhook verification
+- [x] Validate webhook signatures
+- [x] Parse WhatsApp document messages
 - [ ] Add PostgreSQL metadata persistence
 - [ ] Add Redis and Celery processing
 - [ ] Download WhatsApp media
@@ -119,4 +139,3 @@ Production secrets will be stored in OCI Vault.
 - [ ] Upload files to Google Drive
 - [ ] Provision OCI resources with Terraform
 - [ ] Add CI/CD with GitHub Actions
-
