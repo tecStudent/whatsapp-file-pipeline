@@ -6,11 +6,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
-from src.api.dependencies import get_request_settings
+from src.api.dependencies import (
+    get_processing_status_store,
+    get_request_settings,
+    get_task_dispatcher,
+)
 from src.api.security import is_valid_meta_signature
+from src.application.task_dispatcher import TaskDispatcher
 from src.application.webhook_parser import extract_document_events
 from src.config import Settings
 from src.models.webhook import WebhookAccepted
+from src.repositories.processing_status import ProcessingStatusStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhook", tags=["webhook"])
@@ -49,6 +55,11 @@ async def verify_webhook(
 async def receive_webhook(
     request: Request,
     settings: Annotated[Settings, Depends(get_request_settings)],
+    status_store: Annotated[
+        ProcessingStatusStore,
+        Depends(get_processing_status_store),
+    ],
+    task_dispatcher: Annotated[TaskDispatcher, Depends(get_task_dispatcher)],
     signature: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
 ) -> WebhookAccepted:
     app_secret = settings.whatsapp_app_secret.get_secret_value()
@@ -70,9 +81,36 @@ async def receive_webhook(
     payload = _decode_payload(raw_body)
     documents = extract_document_events(payload)
 
-    logger.info("Accepted WhatsApp webhook with %d document message(s)", len(documents))
+    queued = 0
+    duplicates = 0
+    for document in documents:
+        if not status_store.register_received(document):
+            duplicates += 1
+            continue
 
-    return WebhookAccepted(documents_received=len(documents))
+        try:
+            task_dispatcher.enqueue(document)
+        except Exception as exc:
+            status_store.release(document.message_id)
+            logger.exception("Could not enqueue document %s", document.message_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Processing queue is unavailable",
+            ) from exc
+        queued += 1
+
+    logger.info(
+        "Accepted webhook: received=%d queued=%d duplicates=%d",
+        len(documents),
+        queued,
+        duplicates,
+    )
+
+    return WebhookAccepted(
+        documents_received=len(documents),
+        documents_queued=queued,
+        duplicates_ignored=duplicates,
+    )
 
 
 def _decode_payload(raw_body: bytes) -> dict[str, Any]:

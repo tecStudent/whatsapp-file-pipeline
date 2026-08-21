@@ -19,4 +19,5 @@ class DocumentEvent(BaseModel):
 class WebhookAccepted(BaseModel):
     status: Literal["accepted"] = "accepted"
     documents_received: int
-
+    documents_queued: int
+    duplicates_ignored: int

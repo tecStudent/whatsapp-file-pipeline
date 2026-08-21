@@ -23,8 +23,10 @@ class Settings(BaseSettings):
     whatsapp_app_secret: SecretStr = SecretStr("")
     whatsapp_phone_number_id: str = ""
 
+    redis_url: str = "redis://redis:6379/0"
+    processing_status_ttl_seconds: int = 604800
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

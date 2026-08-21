@@ -6,20 +6,40 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from src.api.main import create_app
+from src.application.task_dispatcher import TaskDispatcher
 from src.application.webhook_parser import extract_document_events
 from src.config import Settings
+from src.models.webhook import DocumentEvent
+from src.repositories.processing_status import InMemoryProcessingStatusStore
 
 APP_SECRET = "test-app-secret"
 VERIFY_TOKEN = "test-verify-token"
 
 
-def create_test_client() -> TestClient:
+class RecordingTaskDispatcher(TaskDispatcher):
+    def __init__(self, should_fail: bool = False) -> None:
+        self.events: list[DocumentEvent] = []
+        self.should_fail = should_fail
+
+    def enqueue(self, event: DocumentEvent) -> str:
+        if self.should_fail:
+            raise ConnectionError("queue unavailable")
+        self.events.append(event)
+        return f"task-{event.message_id}"
+
+
+def create_test_client(
+    dispatcher: RecordingTaskDispatcher | None = None,
+) -> tuple[TestClient, InMemoryProcessingStatusStore, RecordingTaskDispatcher]:
     settings = Settings(
         _env_file=None,
         whatsapp_app_secret=APP_SECRET,
         whatsapp_verify_token=VERIFY_TOKEN,
     )
-    return TestClient(create_app(settings))
+    status_store = InMemoryProcessingStatusStore()
+    task_dispatcher = dispatcher or RecordingTaskDispatcher()
+    application = create_app(settings, status_store, task_dispatcher)
+    return TestClient(application), status_store, task_dispatcher
 
 
 def document_payload() -> dict[str, Any]:
@@ -65,7 +85,7 @@ def signed_headers(raw_body: bytes) -> dict[str, str]:
 
 
 def test_webhook_verification_returns_challenge() -> None:
-    client = create_test_client()
+    client, _, _ = create_test_client()
 
     response = client.get(
         "/webhook",
@@ -81,7 +101,7 @@ def test_webhook_verification_returns_challenge() -> None:
 
 
 def test_webhook_verification_rejects_invalid_token() -> None:
-    client = create_test_client()
+    client, _, _ = create_test_client()
 
     response = client.get(
         "/webhook",
@@ -96,17 +116,24 @@ def test_webhook_verification_rejects_invalid_token() -> None:
 
 
 def test_receive_webhook_accepts_valid_document() -> None:
-    client = create_test_client()
+    client, status_store, dispatcher = create_test_client()
     raw_body = json.dumps(document_payload(), separators=(",", ":")).encode()
 
     response = client.post("/webhook", content=raw_body, headers=signed_headers(raw_body))
 
     assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "documents_received": 1}
+    assert response.json() == {
+        "status": "accepted",
+        "documents_received": 1,
+        "documents_queued": 1,
+        "duplicates_ignored": 0,
+    }
+    assert status_store.get("wamid.test-message-id").status == "RECEIVED"
+    assert [event.message_id for event in dispatcher.events] == ["wamid.test-message-id"]
 
 
 def test_receive_webhook_rejects_invalid_signature() -> None:
-    client = create_test_client()
+    client, _, _ = create_test_client()
     raw_body = json.dumps(document_payload()).encode()
 
     response = client.post(
@@ -123,7 +150,7 @@ def test_receive_webhook_rejects_invalid_signature() -> None:
 
 
 def test_receive_webhook_rejects_invalid_json() -> None:
-    client = create_test_client()
+    client, _, _ = create_test_client()
     raw_body = b"not-json"
 
     response = client.post("/webhook", content=raw_body, headers=signed_headers(raw_body))
@@ -133,7 +160,7 @@ def test_receive_webhook_rejects_invalid_json() -> None:
 
 
 def test_receive_webhook_ignores_non_document_messages() -> None:
-    client = create_test_client()
+    client, _, _ = create_test_client()
     payload = document_payload()
     payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
         "from": "5511999999999",
@@ -147,7 +174,43 @@ def test_receive_webhook_ignores_non_document_messages() -> None:
     response = client.post("/webhook", content=raw_body, headers=signed_headers(raw_body))
 
     assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "documents_received": 0}
+    assert response.json() == {
+        "status": "accepted",
+        "documents_received": 0,
+        "documents_queued": 0,
+        "duplicates_ignored": 0,
+    }
+
+
+def test_receive_webhook_ignores_duplicate_message_id() -> None:
+    client, _, dispatcher = create_test_client()
+    raw_body = json.dumps(document_payload(), separators=(",", ":")).encode()
+    headers = signed_headers(raw_body)
+
+    first_response = client.post("/webhook", content=raw_body, headers=headers)
+    duplicate_response = client.post("/webhook", content=raw_body, headers=headers)
+
+    assert first_response.status_code == 200
+    assert duplicate_response.status_code == 200
+    assert duplicate_response.json() == {
+        "status": "accepted",
+        "documents_received": 1,
+        "documents_queued": 0,
+        "duplicates_ignored": 1,
+    }
+    assert len(dispatcher.events) == 1
+
+
+def test_receive_webhook_releases_message_when_queue_is_unavailable() -> None:
+    dispatcher = RecordingTaskDispatcher(should_fail=True)
+    client, status_store, _ = create_test_client(dispatcher)
+    raw_body = json.dumps(document_payload(), separators=(",", ":")).encode()
+
+    response = client.post("/webhook", content=raw_body, headers=signed_headers(raw_body))
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Processing queue is unavailable"}
+    assert status_store.get("wamid.test-message-id") is None
 
 
 def test_extract_document_events_normalizes_payload() -> None:
@@ -164,4 +227,3 @@ def test_extract_document_events_normalizes_payload() -> None:
         "sha256": "document-sha256",
         "caption": "Monthly report",
     }
-

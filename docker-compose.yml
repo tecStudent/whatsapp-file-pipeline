@@ -14,10 +14,14 @@ services:
     environment:
       APP_ENV: development
       LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
       - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -29,3 +33,43 @@ services:
       retries: 3
       start_period: 5s
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - celery
+      - -A
+      - src.worker.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=1
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis_data:
